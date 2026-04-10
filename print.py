@@ -1,0 +1,16 @@
+print("Hello World")
+print("Hello,my name is Akhil, I like playing chess and soccer")
+print(3+5)
+print(8-2)
+print(8*2)
+print(8/2)
+print("Hello",9,"\n",2)
+
+
+print("Welcome to the programming world!")
+print(7)
+print("Hello \nkid")
+print("Hello", 5)
+print("Welcome to " , end= "*")
+print("testing")
+print(6,"\n",9)
