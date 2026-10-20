@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
 
 # --- GLOBAL PARAMETERS & CONSTANTS ---
 ATP0 = 5.0  # Normal physiological ATP concentration set-point (mM)
@@ -13,13 +14,6 @@ ENZYMES = [
     "ACLY_ACC", "FASN"
 ]
 
-DEFAULT_KM = {
-    "Glucose": 0.1, "G6P": 0.05, "F16BP": 0.05, "GAP": 0.1, "Pyruvate": 0.1,
-    "Fructose": 0.2, "F1P": 0.05, "Glyceraldehyde": 0.1,
-    "Galactose": 0.1, "Gal1P": 0.05, "UDPGalactose": 0.05,
-    "Sorbitol": 0.5, "AcetylCoA": 0.1, "MalonylCoA": 0.05
-}
-
 class MetaMapModel:
     def __init__(self, intake=None, activity=None):
         self.intake = intake if intake else {"Glucose": 4.0, "Fructose": 0.5, "Galactose": 0.3}
@@ -27,43 +21,106 @@ class MetaMapModel:
         if activity:
             self.activity.update(activity)
             
-        self.pools = {
-            "Glucose": 0.872, "G6P": 0.251, "F16BP": 0.125, "GAP": 0.181,
-            "Pyruvate": 0.150, "AcetylCoA": 0.225, "Fructose": 0.023, "F1P": 0.022,
-            "Glyceraldehyde": 0.011, "Galactose": 0.026, "Gal1P": 0.021,
-            "UDPGalactose": 0.011, "Galactitol": 0.017, "Sorbitol": 0.013,
-            "MalonylCoA": 0.026, "ATP": 5.0
-        }
-        self.result = {}
+        # Initialize and train the Neural Network surrogate model
+        self._train_neural_network_surrogate()
+        
+    def _train_neural_network_surrogate(self):
+        """Trains a multi-layer perceptron (MLP) mapping enzyme nodes and nutrient inflow to systemic stress."""
+        np.random.seed(42)
+        n_samples = 600
+        
+        X_train = []
+        y_train = []
+        
+        for _ in range(n_samples):
+            g_in = np.random.uniform(0.5, 20.0)
+            f_in = np.random.uniform(0.0, 10.0)
+            gal_in = np.random.uniform(0.0, 5.0)
+            
+            acts = [np.random.uniform(0.0, 1.5) for _ in ENZYMES]
+            
+            aldob_act = acts[7]
+            galt_act = acts[10]
+            sord_act = acts[13]
+            
+            f1p = 0.022 + (1.0 - aldob_act) * 160.0 * (f_in / 0.5)
+            gal1p = 0.021 + (1.0 - galt_act) * 85.0 * (gal_in / 0.3)
+            galactitol = 0.017 + (1.0 - acts[10]) * 5.0 * (gal_in / 0.3)
+            sorbitol = 0.013 + (1.0 - sord_act) * 0.85 * (g_in / 4.0)
+            atp = max(0.5, ATP0 - (f1p * 0.003 + gal1p * 0.004))
+            
+            # Ground-truth biochemical target score
+            score = min(100.0, (
+                (f1p / 150.0) * 20 +
+                (gal1p / 80.0) * 20 +
+                (galactitol / 4.5) * 15 +
+                (sorbitol / 0.8) * 10 +
+                ((ATP0 - atp) / ATP0) * 25 +
+                ((f_in + g_in) / 25.0) * 10
+            ) * 100.0)
+            
+            X_train.append([g_in, f_in, gal_in] + acts)
+            y_train.append(score)
+            
+        self.scaler = StandardScaler()
+        X_scaled = self.scaler.fit_transform(X_train)
+        
+        # Neural Network: Multi-Layer Perceptron with 2 hidden layers (32 and 16 nodes)
+        self.nn_model = MLPRegressor(
+            hidden_layer_sizes=(32, 16),
+            activation='relu',
+            solver='adam',
+            max_iter=600,
+            random_state=42
+        )
+        self.nn_model.fit(X_scaled, y_train)
 
     def simulate(self, hours=48):
-        # Simplified kinetics runner for steady-state pool calculation
-        p = self.pools.copy()
-        act = self.activity
+        g_in = self.intake.get("Glucose", 4.0)
+        f_in = self.intake.get("Fructose", 0.5)
+        gal_in = self.intake.get("Galactose", 0.3)
         
-        # Calculate dynamic metabolite shifts based on enzyme activities & inputs
-        p["F1P"] = 0.022 + (1.0 - act.get("ALDOB", 1.0)) * 160.0 * (self.intake.get("Fructose", 0.5) / 0.5)
-        p["Gal1P"] = 0.021 + (1.0 - act.get("GALT", 1.0)) * 85.0 * (self.intake.get("Galactose", 0.3) / 0.3)
-        p["Galactitol"] = 0.017 + (1.0 - act.get("GALK1", 1.0)) * 5.0 * (self.intake.get("Galactose", 0.3) / 0.3)
-        p["Sorbitol"] = 0.013 + (1.0 - act.get("SORD", 1.0)) * 0.85 * (self.intake.get("Glucose", 4.0) / 4.0)
+        p = {
+            "Glucose": 0.872 * (g_in / 4.0),
+            "G6P": 0.251,
+            "F16BP": 0.125,
+            "GAP": 0.181,
+            "Pyruvate": 0.150,
+            "AcetylCoA": 0.225,
+            "Fructose": f_in * 0.046,
+            "F1P": 0.022 + (1.0 - self.activity.get("ALDOB", 1.0)) * 160.0 * (f_in / 0.5),
+            "Glyceraldehyde": 0.011,
+            "Galactose": gal_in * 0.086,
+            "Gal1P": 0.021 + (1.0 - self.activity.get("GALT", 1.0)) * 85.0 * (gal_in / 0.3),
+            "UDPGalactose": 0.011,
+            "Galactitol": 0.017 + (1.0 - self.activity.get("GALK1", 1.0)) * 5.0 * (gal_in / 0.3),
+            "Sorbitol": 0.013 + (1.0 - self.activity.get("SORD", 1.0)) * 0.85 * (g_in / 4.0),
+            "MalonylCoA": 0.026,
+            "ATP": max(0.5, ATP0 - ((0.022 + (1.0 - self.activity.get("ALDOB", 1.0)) * 160.0 * (f_in / 0.5)) * 0.003))
+        }
         
-        # ATP depletion dynamic calculation
-        atp_drop = (p["F1P"] * 0.003) + (p["Gal1P"] * 0.004)
-        p["ATP"] = max(0.5, ATP0 - atp_drop)
-        
-        self.result = {"pools": p, "intake": self.intake, "activity": act}
+        self.result = {"pools": p, "intake": self.intake, "activity": self.activity}
         return self.result
 
     def stress(self):
-        p = self.result["pools"]
+        # Predict cellular stress score using the trained Neural Network
+        g_in = self.intake.get("Glucose", 4.0)
+        f_in = self.intake.get("Fructose", 0.5)
+        gal_in = self.intake.get("Galactose", 0.3)
+        acts_list = [self.activity[e] for e in ENZYMES]
         
-        # Calculate individual normalized stress features f_i (0 to 1 scale)
+        input_vector = np.array([[g_in, f_in, gal_in] + acts_list])
+        input_scaled = self.scaler.transform(input_vector)
+        predicted_score = float(self.nn_model.predict(input_scaled)[0])
+        score_100 = np.clip(predicted_score, 0.0, 100.0)
+        
+        p = self.result["pools"]
         f_f1p = min(1.0, p["F1P"] / 150.0)
         f_gal1p = min(1.0, p["Gal1P"] / 80.0)
         f_galactitol = min(1.0, p["Galactitol"] / 4.5)
         f_sorbitol = min(1.0, p["Sorbitol"] / 0.8)
         f_atp = max(0.0, (ATP0 - p["ATP"]) / ATP0)
-        f_lipogenic = min(1.0, (self.intake.get("Fructose", 0.5) + self.intake.get("Glucose", 4.0)) / 25.0)
+        f_lipogenic = min(1.0, (f_in + g_in) / 25.0)
 
         weights = {
             "F1P accumulation": (0.20, f_f1p, "Fructose-1-P trapping (aldolase B bottleneck)"),
@@ -75,19 +132,16 @@ class MetaMapModel:
         }
 
         data = []
-        total_score = 0.0
         for feat, (w, f_val, desc) in weights.items():
-            contrib = w * f_val
-            total_score += contrib
+            contrib = w * f_val * 100.0
             data.append({
                 "Feature": feat,
                 "Weight (w_i)": w,
                 "Normalized (f_i)": round(f_val, 3),
-                "Contribution": round(contrib * 100, 2),
+                "Contribution": round(contrib, 2),
                 "Meaning": desc
             })
 
-        score_100 = min(100.0, total_score * 100.0)
         return score_100, pd.DataFrame(data)
 
     def pathway_table(self):
